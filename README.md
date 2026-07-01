@@ -1,4 +1,4 @@
-# GHGR: Payload-Free Online Detection of Malicious VPN Traffic
+# GHGR: Malicious VPN Traffic Detection via Hierarchical Granularity Representation
 
 This repository provides the experimental implementation of **GHGR**, a payload-free malicious VPN traffic detection framework based on hierarchical granularity representation. The codebase follows a two-stage workflow:
 
@@ -479,7 +479,7 @@ If this code is used in academic work, please cite the corresponding GHGR paper:
 
 ```bibtex
 @inproceedings{ghgr2026,
-  title     = {GHGR: Payload-Free Online Detection of Malicious VPN Traffic via Hierarchical Granularity Representation},
+  title     = {GHGR: Malicious VPN Traffic Detection via Hierarchical Granularity Representation},
   author    = {Anonymous},
   booktitle = {Proceedings of Inscrypt},
   year      = {2026}
