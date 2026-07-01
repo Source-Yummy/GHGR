@@ -1,0 +1,495 @@
+# GHGR: Payload-Free Online Detection of Malicious VPN Traffic
+
+This repository provides the experimental implementation of **GHGR**, a payload-free malicious VPN traffic detection framework based on hierarchical granularity representation. The codebase follows a two-stage workflow:
+
+1. **Data preprocessing**: parse PCAP/PCAPNG files, extract payload-free statistical and sequential features, and save them as an NPZ file.
+2. **Model training and evaluation**: load the generated NPZ file, train the GHGR model, save the best checkpoint, and report classification results.
+
+The implementation corresponds to the main components described in the paper, including session-level statistical modeling, flow-level sequential modeling, GRU-TCN temporal representation, cross-modal mutual attention, multi-branch supervision, and improved center-loss regularization.
+
+---
+
+## 1. Overview
+
+Encrypted VPN traffic cannot be inspected through packet payloads. GHGR therefore uses only payload-free metadata, such as packet length, inter-arrival time, packet direction, protocol type, port information, and session-level statistics.
+
+The overall pipeline is:
+
+```text
+PCAP / PCAPNG files
+        |
+        v
+data_preprocessing.py
+        |
+        v
+traffic_data_xxx.npz
+        |
+        v
+GHGR training script
+        |
+        v
+best model checkpoint + evaluation results
+```
+
+The preprocessing script and training script are separated intentionally. This makes it possible to preprocess large PCAP datasets once and reuse the generated NPZ file for repeated model training and evaluation.
+
+---
+
+## 2. Main Features
+
+### Data preprocessing
+
+The preprocessing module supports:
+
+- PCAP/PCAPNG parsing with PyShark and tshark;
+- payload-free packet metadata extraction;
+- 23-dimensional session-level statistical features;
+- fixed-length sequential windows;
+- 10-channel sequence representation;
+- adaptive hybrid filtering;
+- damping-window weighting;
+- capture-file-level train/test splitting;
+- train-only feature standardization to reduce data leakage risk;
+- NPZ cache generation.
+
+### Model training
+
+The training script supports:
+
+- loading preprocessed NPZ data;
+- statistical feature self-attention;
+- GRU-TCN sequential feature extraction;
+- gated fusion between GRU and TCN representations;
+- bidirectional cross-modal mutual attention;
+- auxiliary classifiers for statistical and sequential branches;
+- fusion classifier for final prediction;
+- improved center loss with momentum-based center update;
+- multi-branch loss optimization;
+- checkpoint saving;
+- branch-wise evaluation and visualization.
+
+---
+
+## 3. Repository Structure
+
+A recommended project structure is shown below:
+
+```text
+GHGR/
+├── data_preprocessing.py
+├── train_ghgr.py
+├── requirements.txt
+├── README.md
+├── data/
+│   ├── benign/
+│   └── malicious/
+├── outputs/
+│   ├── traffic_data_cache_strict.npz
+│   ├── best_branches_optimized_model.pth
+│   ├── confusion_matrices_branches.png
+│   └── training_metrics_branches_optimized.png
+└── scripts/
+    ├── run_preprocess.sh
+    └── run_train.sh
+```
+
+The exact folder names can be changed according to the local environment.
+
+---
+
+## 4. Environment Requirements
+
+### Python
+
+Python 3.8 or later is recommended.
+
+### Python packages
+
+Install the required dependencies:
+
+```bash
+pip install numpy pandas scikit-learn matplotlib seaborn pyshark torch
+```
+
+If CUDA is available, install a PyTorch version compatible with your GPU and CUDA driver.
+
+### External dependency
+
+The preprocessing script requires **tshark**, which is included in Wireshark.
+
+Examples:
+
+```text
+Windows: C:/Program Files/Wireshark/tshark.exe
+Linux:   /usr/bin/tshark
+```
+
+Make sure tshark can be executed successfully before running preprocessing.
+
+---
+
+## 5. Data Preprocessing
+
+The preprocessing script converts labelled PCAP/PCAPNG files into a single NPZ file.
+
+### Input format
+
+Each traffic category should be provided as a labelled path:
+
+```text
+/path/to/class_1=class_1
+/path/to/class_2=class_2
+```
+
+Each path can be either a directory containing PCAP/PCAPNG files or a single PCAP/PCAPNG file.
+
+### Example command
+
+Linux/macOS:
+
+```bash
+python data_preprocessing.py \
+  --data "/data/benign_vpn=benign" "/data/malicious_vpn=malicious" \
+  --tshark "/usr/bin/tshark" \
+  --window-length 80 \
+  --cache-path "traffic_data_cache_strict.npz"
+```
+
+Windows:
+
+```bash
+python data_preprocessing.py ^
+  --data "D:/data/benign_vpn=benign" "D:/data/malicious_vpn=malicious" ^
+  --tshark "C:/Program Files/Wireshark/tshark.exe" ^
+  --window-length 80 ^
+  --cache-path "traffic_data_cache_strict.npz"
+```
+
+### Generated NPZ fields
+
+The generated NPZ file contains:
+
+```text
+X_stats_train
+X_seqs_train
+y_train
+X_stats_test
+X_seqs_test
+y_test
+classes
+scaler_stats
+scaler_seq
+train_sample_files
+test_sample_files
+```
+
+The training code is compatible with the following class metadata fields:
+
+```text
+label_encoder
+classes
+class_names
+```
+
+Therefore, NPZ files generated by either the older preprocessing script or the newer `data_preprocessing.py` can be loaded by the training script.
+
+---
+
+## 6. Feature Description
+
+### Statistical features
+
+For each capture/session, the preprocessing module extracts a 23-dimensional statistical feature vector. It includes:
+
+- total packet count;
+- total duration;
+- packet rate;
+- mean and standard deviation of packet length;
+- inbound packet statistics;
+- outbound packet statistics;
+- TCP/UDP ratio;
+- direction-change count;
+- inbound/outbound ratio;
+- TCP SYN and ACK flag statistics;
+- source and destination port diversity.
+
+The statistical vector is repeated for each generated sequential window from the same capture.
+
+### Sequential features
+
+For each sliding window, a 10-channel sequential representation is generated:
+
+```text
+0. inbound packet length after damping
+1. outbound packet length after damping
+2. inter-arrival time after damping
+3. filtered inbound packet length
+4. filtered outbound packet length
+5. filtered inter-arrival time
+6. first-order difference of inbound length
+7. first-order difference of outbound length
+8. second-order difference of inbound length
+9. packet direction
+```
+
+The default window length is 80, which matches the main experimental setting.
+
+---
+
+## 7. Model Architecture
+
+The training script implements the GHGR model with the following modules.
+
+### Statistical branch
+
+The statistical branch uses a self-attention layer to model correlations among payload-free statistical features. The output is projected into a 128-dimensional statistical representation.
+
+Main code components:
+
+```text
+StatsSelfAttention
+stats_branch
+stats_classifier
+```
+
+### Sequential branch
+
+The sequential branch uses a hybrid GRU-TCN module to capture both temporal dependency and local traffic dynamics.
+
+Main code components:
+
+```text
+GRU_TCN_Module
+TemporalConvNet
+TemporalBlock
+MultiScaleConvBlock
+ChannelSELayer
+seq_classifier
+```
+
+The GRU captures bidirectional temporal behavior, while the TCN captures local and dilated temporal patterns. A learnable gate fuses the GRU and TCN outputs.
+
+### Cross-modal mutual attention
+
+The fusion module exchanges information between statistical and sequential representations.
+
+Main code component:
+
+```text
+CrossModalMutualAttention
+```
+
+It performs attention in both directions:
+
+```text
+statistics -> sequence
+sequence -> statistics
+```
+
+The fused representation is then passed to the final classifier.
+
+### Improved center loss
+
+The improved center-loss module encourages compact intra-class statistical representations.
+
+Main code component:
+
+```text
+ImprovedCenterLoss
+```
+
+It includes:
+
+- L2-normalized features and class centers;
+- class-center initialization using batch class means;
+- momentum-based center update;
+- numerical distance clamping for stable training.
+
+---
+
+## 8. Training
+
+Before training, make sure the NPZ file has already been generated.
+
+In the training script, set:
+
+```python
+NPZ_FILE_PATH = "traffic_data_cache_strict.npz"
+MODEL_SAVE_PATH = "best_branches_optimized_model.pth"
+```
+
+Then run:
+
+```bash
+python train_ghgr.py
+```
+
+The script will:
+
+1. load the NPZ file;
+2. check required fields;
+3. read class names from `label_encoder`, `classes`, or `class_names`;
+4. convert labels to one-hot format;
+5. build the GHGR model;
+6. train the model with multi-branch losses;
+7. save the best checkpoint;
+8. evaluate statistical, sequential, and fusion branches.
+
+---
+
+## 9. Loss Function
+
+The total training loss consists of four terms:
+
+```text
+L_total = w_stats * L_stats
+        + w_seq * L_seq
+        + w_fused * L_fused
+        + w_center * L_center
+```
+
+The default loss weights are:
+
+```python
+LOSS_WEIGHTS = {
+    "stats": 0.3,
+    "seq": 0.3,
+    "fused": 0.3,
+    "center": 0.1
+}
+```
+
+The classification losses are cross-entropy losses. The center-loss term is applied to the statistical feature representation.
+
+The training script also uses a warm-up strategy to dynamically adjust the branch losses during early epochs.
+
+---
+
+## 10. Evaluation
+
+After training, the best checkpoint is loaded and evaluated on the test split.
+
+The script reports:
+
+- statistical branch accuracy;
+- sequential branch accuracy;
+- fusion branch accuracy;
+- precision, recall, and F1-score for each class;
+- confusion matrices for all three branches.
+
+The following output files are generated:
+
+```text
+best_branches_optimized_model.pth
+confusion_matrices_branches.png
+training_metrics_branches_optimized.png
+```
+
+---
+
+## 11. NPZ Compatibility
+
+The training script supports different class-name storage formats.
+
+Supported formats:
+
+```text
+label_encoder
+classes
+class_names
+```
+
+This avoids incompatibility between older NPZ files and newer preprocessing scripts.
+
+The required NPZ arrays are:
+
+```text
+X_stats_train
+X_seqs_train
+y_train
+X_stats_test
+X_seqs_test
+y_test
+```
+
+If any required array is missing, the script will raise an error.
+
+---
+
+## 12. Notes on Reproducibility
+
+To improve reproducibility, users should keep the following settings consistent:
+
+- window length;
+- train/test split strategy;
+- random seed;
+- class labels;
+- tshark version;
+- preprocessing cache path;
+- model hyperparameters;
+- loss weights;
+- batch size and accumulation steps.
+
+The preprocessing script performs capture-file-level splitting. This prevents windows from the same PCAP file from appearing in both training and test sets.
+
+For stricter experimental protocols, a separate validation set can be added and used for checkpoint selection, while the test set should be used only for final evaluation.
+
+---
+
+## 13. Example Workflow
+
+### Step 1: Preprocess PCAP files
+
+```bash
+python data_preprocessing.py \
+  --data "/data/benign=benign" "/data/malicious=malicious" \
+  --tshark "/usr/bin/tshark" \
+  --window-length 80 \
+  --cache-path "traffic_data_cache_strict.npz"
+```
+
+### Step 2: Train GHGR
+
+Edit the training script:
+
+```python
+NPZ_FILE_PATH = "traffic_data_cache_strict.npz"
+MODEL_SAVE_PATH = "best_branches_optimized_model.pth"
+```
+
+Run:
+
+```bash
+python train_ghgr.py
+```
+
+### Step 3: Check outputs
+
+```text
+best_branches_optimized_model.pth
+confusion_matrices_branches.png
+training_metrics_branches_optimized.png
+```
+
+---
+
+## 14. Citation
+
+If this code is used in academic work, please cite the corresponding GHGR paper:
+
+```bibtex
+@inproceedings{ghgr2026,
+  title     = {GHGR: Payload-Free Online Detection of Malicious VPN Traffic via Hierarchical Granularity Representation},
+  author    = {Anonymous},
+  booktitle = {Proceedings of Inscrypt},
+  year      = {2026}
+}
+```
+
+---
+
+## 15. Disclaimer
+
+This implementation is intended for academic research and defensive security evaluation. It uses only payload-free traffic metadata and does not decrypt, inspect, or store application-layer payload content.
+
+Users should ensure that all traffic collection and analysis activities comply with applicable laws, institutional policies, and ethical requirements.
